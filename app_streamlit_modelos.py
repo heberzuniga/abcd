@@ -31,6 +31,42 @@ from sklearn.datasets import load_diabetes, make_regression
 import plotly.express as px
 import plotly.graph_objects as go
 
+def _extract_pdp_xy(pd_result):
+    \"\"\"Devuelve (xs, ys) de forma robusta a la versión de scikit-learn.
+    Admite:
+      - Bunch con atributos: average + values | grid_values
+      - dict con claves: 'average' + ('values'|'grid_values')
+      - tupla/lista legacy: (averages, values)
+    \"\"\"
+    # Caso 1: Bunch u objeto con atributos
+    if hasattr(pd_result, "average"):
+        ys = pd_result.average[0]
+        xs = None
+        if hasattr(pd_result, "values") and pd_result.values is not None:
+            xs = pd_result.values[0]
+        elif hasattr(pd_result, "grid_values") and pd_result.grid_values is not None:
+            xs = pd_result.grid_values[0]
+        if xs is None:
+            raise ValueError("Partial dependence no expuso 'values' ni 'grid_values'.")
+        return xs, ys
+    # Caso 2: dict
+    if isinstance(pd_result, dict):
+        ys = pd_result.get("average", [None])[0]
+        values = pd_result.get("values")
+        if values is None:
+            values = pd_result.get("grid_values")
+        if ys is None or values is None:
+            raise ValueError("Estructura de salida de partial_dependence no reconocida (dict).")
+        xs = values[0]
+        return xs, ys
+    # Caso 3: legacy tuple/list: (averages, values)
+    if isinstance(pd_result, (tuple, list)) and len(pd_result) >= 2:
+        ys = pd_result[0][0]
+        xs = pd_result[1][0]
+        return xs, ys
+    raise ValueError("Formato de salida de partial_dependence no reconocido.")
+
+
 # ----------------------
 # 2) CONFIGURACIÓN DE PÁGINA
 # ----------------------
@@ -339,9 +375,8 @@ else:
         try:
             feat_index = list(X.columns).index(pd_feature)  # índice en el espacio original
             pd_result = partial_dependence(model, X=X_test, features=[feat_index], kind="average")
-            xs = pd_result["values"][0]
-            ys = pd_result["average"][0]
-            fig_pd = px.line(x=xs, y=ys, labels={"x": pd_feature, "y": "Predicción media"}, title=f"Dependencia parcial — {focus_model_name} sobre {pd_feature}")
+        xs, ys = _extract_pdp_xy(pd_result)
+        fig_pd = px.line(x=xs, y=ys, labels={"x": pd_feature, "y": "Predicción media"}, title=f"Dependencia parcial — {focus_model_name} sobre {pd_feature}")
             fig_pd.update_layout(template="plotly_white")
             st.plotly_chart(fig_pd, use_container_width=True)
         except Exception as e:
