@@ -253,7 +253,7 @@ for name in selected_models:
 
     r2 = r2_score(y_test, y_pred)
     mae = mean_absolute_error(y_test, y_pred)
-    rmse = mean_squared_error(y_test, y_pred, squared=False)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
 
     if do_cv:
         cv = KFold(n_splits=k_folds, shuffle=True, random_state=random_state)
