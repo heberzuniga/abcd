@@ -1,8 +1,8 @@
 # ===============================================================
 # app_streamlit_modelos.py
-# Demo Streamlit con comparación de modelos de regresión y
-# soporte robusto para cargar archivos CSV/XLSX desde la UI.
-# (Incluye explicaciones línea por línea como comentarios.)
+# Demo Streamlit con comparación de modelos (regresión) y
+# soporte robusto para cargar CSV/XLSX + One-Hot Encoding automático.
+# Explicado línea por línea en comentarios.
 # ===============================================================
 
 # ----------------------
@@ -15,7 +15,7 @@ from typing import Dict, Any, List, Optional
 
 from sklearn.model_selection import train_test_split, KFold, cross_val_score
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, PolynomialFeatures
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from sklearn.inspection import partial_dependence, permutation_importance
@@ -48,6 +48,7 @@ st.markdown(
     """
 Este demo permite **cargar un dataset (CSV/XLSX)**, **entrenar múltiples modelos** y 
 **visualizar** correlaciones, **pred vs real**, **residuales**, **importancia de variables** y **dependencia parcial**.
+Ahora con **One‑Hot Encoding automático** para columnas categóricas.
 """
 )
 
@@ -56,37 +57,27 @@ Este demo permite **cargar un dataset (CSV/XLSX)**, **entrenar múltiples modelo
 # ----------------------
 @st.cache_data(show_spinner=False)
 def read_csv_bytes(file_bytes: bytes, delimiter: str) -> pd.DataFrame:
-    # Lee CSV desde bytes con un delimitador elegido por el usuario
     from io import BytesIO, StringIO
     try:
-        # Intento directo como texto
         return pd.read_csv(StringIO(file_bytes.decode('utf-8')), sep=delimiter)
     except Exception:
-        # Fallback a binario
         return pd.read_csv(BytesIO(file_bytes), sep=delimiter)
 
 @st.cache_data(show_spinner=False)
 def read_excel_bytes(file_bytes: bytes, sheet_name: Optional[str]) -> pd.DataFrame:
-    # Lee Excel desde bytes; si no hay sheet_name se toma la primera hoja
     import io
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
     if sheet_name is None or sheet_name not in xls.sheet_names:
         sheet_name = xls.sheet_names[0]
     return pd.read_excel(xls, sheet_name=sheet_name)
 
-def build_data_dict_from_df(df: pd.DataFrame, target_col: str) -> Dict[str, Any]:
-    # Asegura que solo trabajamos con columnas numéricas para sklearn
-    if target_col not in df.columns:
+def build_data_dict_from_df(raw_df: pd.DataFrame, target_col: str) -> Dict[str, Any]:
+    # Mantiene todas las columnas (numéricas y categóricas). Se limpian filas con NA en y.
+    if target_col not in raw_df.columns:
         raise ValueError("La columna objetivo seleccionada no existe en el DataFrame.")
-    y = df[target_col]
-    X = df.drop(columns=[target_col])
-    # Filtra a numéricas (si hay categóricas, sugiere preprocesarlas fuera o convertir dummy aparte)
-    numeric_cols = X.select_dtypes(include=["number"]).columns.tolist()
-    if len(numeric_cols) < X.shape[1]:
-        st.warning("Se detectaron columnas no numéricas. Solo se usarán columnas numéricas para los modelos.")
-    X = X[numeric_cols]
-    # Elimina filas con NA en X o y (decisión simple para el demo)
-    valid_idx = X.notna().all(axis=1) & y.notna()
+    y = raw_df[target_col]
+    X = raw_df.drop(columns=[target_col])
+    valid_idx = y.notna()
     X = X.loc[valid_idx]
     y = y.loc[valid_idx]
     df_clean = X.copy()
@@ -97,22 +88,15 @@ def build_data_dict_from_df(df: pd.DataFrame, target_col: str) -> Dict[str, Any]
 # 5) SIDEBAR: CARGA DE ARCHIVO O DATASETS DE EJEMPLO
 # ----------------------
 st.sidebar.header("📂 Datos")
-
-# Bloque de subida de archivo
-file = st.sidebar.file_uploader(
-    "Sube tu dataset (CSV o XLSX)", type=["csv", "xlsx"]
-)
+file = st.sidebar.file_uploader("Sube tu dataset (CSV o XLSX)", type=["csv", "xlsx"])
 
 data_dict: Optional[Dict[str, Any]] = None
-uploaded_target: Optional[str] = None
 
 if file is not None:
-    # Si es CSV, pedimos delimitador
     if file.name.lower().endswith(".csv"):
         delimiter = st.sidebar.selectbox("Delimitador (CSV)", [",", ";", "\t", "|"], index=0)
         df_up = read_csv_bytes(file.getvalue(), delimiter)
     else:
-        # XLSX: elegimos hoja
         import io
         xls = pd.ExcelFile(io.BytesIO(file.getvalue()))
         sheet = st.sidebar.selectbox("Hoja (XLSX)", xls.sheet_names, index=0)
@@ -122,16 +106,12 @@ if file is not None:
 
     # Selección de columna objetivo
     uploaded_target = st.sidebar.selectbox("Selecciona la columna objetivo (y)", df_up.columns)
-
-    # Construimos data_dict desde el archivo subido
     try:
         data_dict = build_data_dict_from_df(df_up, uploaded_target)
     except Exception as e:
         st.sidebar.error(f"Error preparando datos: {e}")
         st.stop()
-
 else:
-    # Si no subieron archivo, ofrecer datasets de ejemplo
     dataset_choice = st.sidebar.selectbox("O elige un dataset de ejemplo", 
                                           ["Diabetes (sklearn)", "Sintético (make_regression)", "Sintético de viviendas (CSV de ejemplo)"])
 
@@ -154,7 +134,6 @@ else:
             df["target"] = y
             return {"X": X, "y": y, "df": df, "feature_names": feature_names, "target_name": "target"}
         else:
-            # Carga el CSV de viviendas previamente generado si está disponible en el entorno
             try:
                 df = pd.read_csv("/mnt/data/dataset_regresion_viviendas_1500.csv")
             except Exception:
@@ -166,9 +145,11 @@ else:
 
     data_dict = load_dataset(dataset_choice)
 
-# Variables comunes a partir de data_dict
+# Variables comunes
 X, y = data_dict["X"], data_dict["y"]
-feature_names = data_dict["feature_names"]
+all_cols = list(X.columns)
+numeric_cols = X.select_dtypes(include=["number"]).columns.tolist()
+categorical_cols = [c for c in all_cols if c not in numeric_cols]
 target_name = data_dict["target_name"]
 
 # ----------------------
@@ -176,6 +157,7 @@ target_name = data_dict["target_name"]
 # ----------------------
 with st.expander("👀 Vista previa del dataset"):
     st.write(data_dict["df"].head())
+    st.caption(f"Numéricas detectadas: {len(numeric_cols)} | Categóricas detectadas: {len(categorical_cols)}")
 
 # ----------------------
 # 7) CONFIGURACIÓN DE SPLIT Y CV
@@ -189,7 +171,7 @@ k_folds = st.sidebar.slider("K folds", 3, 10, 5)
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
 
 # ----------------------
-# 8) MODELADO
+# 8) PREPROCESADOR (NUM + CAT) + MODELOS
 # ----------------------
 st.sidebar.subheader("🧠 Modelos")
 poly_degree = st.sidebar.slider("Polynomial degree", 2, 6, 3)
@@ -210,23 +192,34 @@ gb_max_depth = st.sidebar.slider("GB max_depth", 2, 10, 3)
 et_n_estimators = st.sidebar.slider("ExtraTrees n_estimators", 50, 500, 200, 50)
 et_max_depth = st.sidebar.slider("ExtraTrees max_depth", 2, 30, 12)
 
-def build_models() -> Dict[str, Pipeline]:
-    standard = ("scale", StandardScaler(), feature_names)
-    pre = ColumnTransformer(transformers=[standard], remainder="passthrough")
+# OneHotEncoder instanciado de forma compatible (según versión de sklearn)
+try:
+    ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+except TypeError:
+    ohe = OneHotEncoder(handle_unknown="ignore", sparse=False)
 
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("num", StandardScaler(), numeric_cols),
+        ("cat", ohe, categorical_cols)
+    ],
+    remainder="drop"
+)
+
+def build_models() -> Dict[str, Pipeline]:
     models: Dict[str, Pipeline] = {}
-    models["Linear"] = Pipeline([("prep", pre), ("lin", LinearRegression())])
-    models["Polynomial"] = Pipeline([("prep", pre), ("poly", PolynomialFeatures(degree=poly_degree, include_bias=False)),
+    models["Linear"] = Pipeline([("prep", preprocessor), ("lin", LinearRegression())])
+    models["Polynomial"] = Pipeline([("prep", preprocessor), ("poly", PolynomialFeatures(degree=poly_degree, include_bias=False)),
                                      ("scale2", StandardScaler(with_mean=False)), ("lin", LinearRegression())])
-    models["Ridge"] = Pipeline([("prep", pre), ("ridge", Ridge(alpha=alpha_ridge, random_state=random_state))])
-    models["Lasso"] = Pipeline([("prep", pre), ("lasso", Lasso(alpha=alpha_lasso, random_state=random_state, max_iter=20_000))])
-    models["ElasticNet"] = Pipeline([("prep", pre), ("enet", ElasticNet(alpha=alpha_en, l1_ratio=l1_ratio_en, random_state=random_state, max_iter=20_000))])
-    models["SVR (RBF)"] = Pipeline([("prep", pre), ("svr", SVR(C=svr_C, epsilon=svr_epsilon, gamma=svr_gamma))])
-    models["KNN"] = Pipeline([("prep", pre), ("knn", KNeighborsRegressor(n_neighbors=knn_k))])
-    models["DecisionTree"] = Pipeline([("tree", DecisionTreeRegressor(max_depth=tree_max_depth, random_state=random_state))])
-    models["RandomForest"] = Pipeline([("rf", RandomForestRegressor(n_estimators=rf_n_estimators, max_depth=rf_max_depth, random_state=random_state, n_jobs=-1))])
-    models["GradientBoosting"] = Pipeline([("gb", GradientBoostingRegressor(n_estimators=gb_n_estimators, learning_rate=gb_learning_rate, max_depth=gb_max_depth, random_state=random_state))])
-    models["ExtraTrees"] = Pipeline([("et", ExtraTreesRegressor(n_estimators=et_n_estimators, max_depth=et_max_depth, random_state=random_state, n_jobs=-1))])
+    models["Ridge"] = Pipeline([("prep", preprocessor), ("ridge", Ridge(alpha=alpha_ridge, random_state=random_state))])
+    models["Lasso"] = Pipeline([("prep", preprocessor), ("lasso", Lasso(alpha=alpha_lasso, random_state=random_state, max_iter=20_000))])
+    models["ElasticNet"] = Pipeline([("prep", preprocessor), ("enet", ElasticNet(alpha=alpha_en, l1_ratio=l1_ratio_en, random_state=random_state, max_iter=20_000))])
+    models["SVR (RBF)"] = Pipeline([("prep", preprocessor), ("svr", SVR(C=svr_C, epsilon=svr_epsilon, gamma=svr_gamma))])
+    models["KNN"] = Pipeline([("prep", preprocessor), ("knn", KNeighborsRegressor(n_neighbors=knn_k))])
+    models["DecisionTree"] = Pipeline([("prep", preprocessor), ("tree", DecisionTreeRegressor(max_depth=tree_max_depth, random_state=random_state))])
+    models["RandomForest"] = Pipeline([("prep", preprocessor), ("rf", RandomForestRegressor(n_estimators=rf_n_estimators, max_depth=rf_max_depth, random_state=random_state, n_jobs=-1))])
+    models["GradientBoosting"] = Pipeline([("prep", preprocessor), ("gb", GradientBoostingRegressor(n_estimators=gb_n_estimators, learning_rate=gb_learning_rate, max_depth=gb_max_depth, random_state=random_state))])
+    models["ExtraTrees"] = Pipeline([("prep", preprocessor), ("et", ExtraTreesRegressor(n_estimators=et_n_estimators, max_depth=et_max_depth, random_state=random_state, n_jobs=-1))])
     return models
 
 all_models = build_models()
@@ -239,11 +232,19 @@ selected_models = st.sidebar.multiselect("Selecciona modelos", model_names, defa
 results: List[Dict[str, Any]] = []
 fitted_models: Dict[str, Pipeline] = {}
 preds_store: Dict[str, np.ndarray] = {}
+feature_names_out_cache: Dict[str, List[str]] = {}
 
 for name in selected_models:
     model = all_models[name]
     model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
+
+    # Intentamos obtener los nombres después del preprocesamiento (num + OHE)
+    try:
+        feature_names_out = model.named_steps["prep"].get_feature_names_out()
+    except Exception:
+        feature_names_out = [f"f{i}" for i in range(model.named_steps["prep"].transform(X_train).shape[1])]
+    feature_names_out_cache[name] = feature_names_out.tolist()
 
     r2 = r2_score(y_test, y_pred)
     mae = mean_absolute_error(y_test, y_pred)
@@ -267,10 +268,10 @@ if results:
     st.dataframe(metrics_df, use_container_width=True)
 
 # ----------------------
-# 10) HEATMAP DE CORRELACIÓN
+# 10) HEATMAP DE CORRELACIÓN (solo numéricas originales)
 # ----------------------
-with st.expander("📊 Correlación (heatmap)"):
-    df_corr = data_dict["df"].corr(numeric_only=True)
+with st.expander("📊 Correlación (heatmap, columnas numéricas originales)"):
+    df_corr = data_dict["df"][numeric_cols + [target_name]].corr(numeric_only=True)
     fig_corr = px.imshow(df_corr, text_auto=".2f", aspect="auto", color_continuous_scale="Viridis", title="Matriz de correlación")
     st.plotly_chart(fig_corr, use_container_width=True)
 
@@ -284,6 +285,7 @@ else:
     focus_model_name = st.selectbox("Modelo para análisis profundo", selected_models)
     model = fitted_models[focus_model_name]
     y_pred = preds_store[focus_model_name]
+    feature_names_out = feature_names_out_cache.get(focus_model_name, [])
 
     # 11.1) Predicho vs Real
     fig_scatter = go.Figure()
@@ -306,44 +308,47 @@ else:
     st.plotly_chart(fig_res_scatter, use_container_width=True)
 
     # 11.3) Importancia de variables
-    st.markdown("#### 📌 Importancia de variables")
-    def get_feature_importance(estimator, Xv, yv) -> pd.DataFrame:
+    st.markdown("#### 📌 Importancia de variables (OHE incluido)")
+    def get_feature_importance(estimator, Xv, yv, names_out: List[str]) -> pd.DataFrame:
         final_step = estimator.steps[-1][1] if isinstance(estimator, Pipeline) else estimator
+        # Intento 1: árboles/ensembles con feature_importances_
         if hasattr(final_step, "feature_importances_"):
             importances = final_step.feature_importances_
-            names = feature_names
-            return pd.DataFrame({"feature": names, "importance": importances}).sort_values("importance", ascending=False)
+            return pd.DataFrame({"feature": names_out, "importance": importances}).sort_values("importance", ascending=False)
+        # Intento 2: permutation importance sobre columnas preprocesadas
         r = permutation_importance(estimator, Xv, yv, n_repeats=10, random_state=random_state, n_jobs=-1)
-        names = feature_names
-        return pd.DataFrame({"feature": names, "importance": r.importances_mean}).sort_values("importance", ascending=False)
+        return pd.DataFrame({"feature": names_out, "importance": r.importances_mean}).sort_values("importance", ascending=False)
 
     try:
-        fi_df = get_feature_importance(model, X_test, y_test)
-        fig_imp = px.bar(fi_df.head(20), x="importance", y="feature", orientation="h", title=f"Top Importancias — {focus_model_name}")
+        fi_df = get_feature_importance(model, X_test, y_test, feature_names_out)
+        fig_imp = px.bar(fi_df.head(30), x="importance", y="feature", orientation="h", title=f"Top Importancias — {focus_model_name}")
         fig_imp.update_layout(template="plotly_white")
         st.plotly_chart(fig_imp, use_container_width=True)
     except Exception as e:
         st.warning(f"No fue posible calcular importancia de variables: {e}")
 
-    # 11.4) Dependencia Parcial (1D)
-    st.markdown("#### 🧭 Dependencia parcial (1D)")
-    pd_feature = st.selectbox("Elige una característica", feature_names)
-    try:
-        pd_result = partial_dependence(model, X=X_test, features=[feature_names.index(pd_feature)], kind="average")
-        xs = pd_result["values"][0]
-        ys = pd_result["average"][0]
-        fig_pd = px.line(x=xs, y=ys, labels={"x": pd_feature, "y": "Predicción media"}, title=f"Dependencia parcial — {focus_model_name} sobre {pd_feature}")
-        fig_pd.update_layout(template="plotly_white")
-        st.plotly_chart(fig_pd, use_container_width=True)
-    except Exception as e:
-        st.info(f"No se pudo calcular dependencia parcial para este modelo/feature: {e}")
+    # 11.4) Dependencia Parcial (solo features numéricas originales)
+    st.markdown("#### 🧭 Dependencia parcial (1D, solo numéricas originales)")
+    if numeric_cols:
+        pd_feature = st.selectbox("Elige una característica numérica original", numeric_cols)
+        try:
+            feat_index = list(X.columns).index(pd_feature)  # índice en el espacio original
+            pd_result = partial_dependence(model, X=X_test, features=[feat_index], kind="average")
+            xs = pd_result["values"][0]
+            ys = pd_result["average"][0]
+            fig_pd = px.line(x=xs, y=ys, labels={"x": pd_feature, "y": "Predicción media"}, title=f"Dependencia parcial — {focus_model_name} sobre {pd_feature}")
+            fig_pd.update_layout(template="plotly_white")
+            st.plotly_chart(fig_pd, use_container_width=True)
+        except Exception as e:
+            st.info(f"No se pudo calcular dependencia parcial para este modelo/feature: {e}")
+    else:
+        st.info("No hay columnas numéricas originales disponibles para PDP.")
 
 # ----------------------
 # 12) PIE DE PÁGINA + DESCARGA CSV DE EJEMPLO
 # ----------------------
 st.caption("Creado con ❤️ usando Streamlit, scikit-learn y Plotly.")
 try:
-    # Si existe el CSV de ejemplo, ofrecer descarga
     with open("/mnt/data/dataset_regresion_viviendas_1500.csv", "rb") as f:
         st.download_button("⬇️ Descargar CSV de ejemplo (viviendas, 1.500 filas)", f, file_name="dataset_regresion_viviendas_1500.csv", mime="text/csv")
 except Exception:
