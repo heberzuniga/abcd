@@ -30,22 +30,41 @@ import plotly.graph_objects as go
 
 # Helper: extrae xs, ys de partial_dependence en múltiples versiones de sklearn
 def _extract_pdp_xy(pd_result):
-    """Devuelve (xs, ys) de forma robusta a la versión de scikit-learn.
-    Admite:
-      - Bunch con atributos: average + values | grid_values
-      - dict con claves: 'average' + ('values'|'grid_values')
-      - tupla/lista legacy: (averages, values)
     """
-    # Caso 1: Bunch u objeto con atributos
-    if hasattr(pd_result, "average"):
-        ys = pd_result.average[0]
-        xs = None
-        if hasattr(pd_result, "values") and getattr(pd_result, "values") is not None:
-            xs = pd_result.values[0]
-        elif hasattr(pd_result, "grid_values") and getattr(pd_result, "grid_values") is not None:
-            xs = pd_result.grid_values[0]
-        if xs is None:
-            raise ValueError("Partial dependence no expuso 'values' ni 'grid_values'.")
+    Devuelve (xs, ys) robusto a versiones de sklearn.
+    Soporta: Bunch/dict con 'average' + ('values' o 'grid_values'),
+    y tupla/lista legacy: (averages, values).
+    Importante: usar acceso por clave (['values']) para no confundir con el método .values().
+    """
+    # Caso 1: dict/Bunch (mapping)
+    try:
+        ys = pd_result["average"][0]
+        vals = pd_result.get("values")
+        if vals is None:
+            vals = pd_result.get("grid_values")
+        if vals is None:
+            raise KeyError("No hay 'values' ni 'grid_values'")
+        xs = vals[0]
+        return xs, ys
+    except Exception:
+        pass
+
+    # Caso 2: legacy tuple/list (averages, values)
+    if isinstance(pd_result, (tuple, list)) and len(pd_result) >= 2:
+        ys = pd_result[0][0]
+        xs = pd_result[1][0]
+        return xs, ys
+
+    # Caso 3: objeto con __getitem__ y .get disponible en runtime
+    try:
+        ys = pd_result["average"][0]
+        vals = pd_result.get("values", None)
+        if vals is None:
+            vals = pd_result.get("grid_values", None)
+        xs = vals[0]
+        return xs, ys
+    except Exception as e:
+        raise ValueError(f"Formato de salida de partial_dependence no reconocido: {e}")
         return xs, ys
     # Caso 2: dict
     if isinstance(pd_result, dict):
