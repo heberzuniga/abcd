@@ -119,9 +119,14 @@ else:
         if choice == "Diabetes (sklearn)":
             data = load_diabetes(as_frame=True)
             df = data.frame.copy()
-            X = df.drop(columns=[data.target_names[0]])
-            y = df[data.target_names[0]]
-            return {"X": X, "y": y, "df": df, "feature_names": list(X.columns), "target_name": data.target_names[0]}
+            # Nombre robusto para la columna objetivo
+            tgt = getattr(data, 'target', None)
+            target_name = getattr(tgt, 'name', 'target')
+            if target_name not in df.columns:
+                target_name = 'target'
+            X = df.drop(columns=[target_name])
+            y = df[target_name]
+            return {"X": X, "y": y, "df": df, "feature_names": list(X.columns), "target_name": target_name}
         elif choice == "Sintético (make_regression)":
             n_samples = st.sidebar.slider("n_samples", 200, 3000, 900, 100)
             n_features = st.sidebar.slider("n_features", 4, 30, 8)
